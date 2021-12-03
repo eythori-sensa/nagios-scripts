@@ -15,7 +15,7 @@
 # warranty of merchantability or fitness for a particular purpose.
 #
 
-our $VERSION = "1.1.2";
+our $VERSION = "1.1.1";
 
 open(STDERR, ">&STDOUT");
 
@@ -28,7 +28,7 @@ open(STDERR, ">&STDOUT");
 #   1.0.5   - fix thresholds
 #   1.1.0   - support for HTTP interface
 #   1.1.1   - drop perl 5.10 requirement
-#   1.1.2   - adding a backend ignore flag
+#   1.1.2   - fix perfdata (noudAndi)
 
 use strict;
 use warnings;
@@ -55,19 +55,22 @@ DESCRIPTION
 
     OPTIONS
     -c, --critical
-        Set critical threshold for sessions number (chacks current number of sessions
+        Set critical threshold for sessions number (checks current number of sessions
         against session limit, if enforced) to the specified percentage.
         If no session limit (slim) was specified for the given proxy, this option has
-        no effect.
+        no effect. Default: 90
 
     -d, --dump
-        Just dump haproxy stats and exit;
+        Just dump haproxy stats and exit.
 
     -h, --help
         Print this message.
 
     -m, --ignore-maint
         Assume servers in MAINT state to be ok.
+
+    --no-stats-exit-code
+        Which exit code to use if stats cannot be obtained. Default: 3
 
     -p, --proxy
         Check only named proxies, not every one. Use comma to separate proxies
@@ -76,24 +79,22 @@ DESCRIPTION
     -P, --no-proxy
         Do not check named proxies. Use comma to separate proxies in list.
 
-    -B, --no-backend
-        Do not check named backend. Use comma to separate backend in list.
-
     -s, --sock, --socket
-        Use named UNIX socket instead of default (/var/run/haproxy.sock)
+        Use named UNIX socket instead of default (/var/run/haproxy.sock).
 
     -U, --url
         Use HTTP URL instead of socket. The LWP::Simple perl module is used if
         available. Otherwise, it falls back to using the external command `curl`.
 
     -u, --user, --username
-        Username for the HTTP URL
+        Username for the HTTP URL.
 
     -x, --pass, --password
-        Password for the HTTP URL
+        Password for the HTTP URL.
 
     -w, --warning
-        Set warning threshold for sessions number to the specified percentage (see -c)
+        Set warning threshold for sessions number to the specified percentage (see -c).
+        Default: 80
 
 CHECKS AND OUTPUT
     $me checks every proxy (or the named ones, if -p was given)
@@ -155,30 +156,36 @@ my $dump;
 my $ignore_maint;
 my $proxy;
 my $no_proxy;
-my $no_backend;
+my $no_stats_exit_code = 3;
 my $help;
 
 # Read command line
 Getopt::Long::Configure ("bundling");
 GetOptions (
-    "c|critical=i"      => \$scrit,
-    "d|dump"            => \$dump,
-    "h|help"            => \$help,
-    "m|ignore-maint"    => \$ignore_maint,
-    "p|proxy=s"         => \$proxy,
-    "P|no-proxy=s"      => \$no_proxy,
-    "B|no-backend=s"    => \$no_backend,
-    "s|sock|socket=s"   => \$sock,
-    "U|url=s"           => \$url,
-    "u|user|username=s" => \$user,
-    "x|pass|password=s" => \$pass,
-    "w|warning=i"       => \$swarn,
+    "c|critical=i"          => \$scrit,
+    "d|dump"                => \$dump,
+    "h|help"                => \$help,
+    "m|ignore-maint"        => \$ignore_maint,
+    "no-stats-exit-code=i"  => \$no_stats_exit_code,
+    "p|proxy=s"             => \$proxy,
+    "P|no-proxy=s"          => \$no_proxy,
+    "s|sock|socket=s"       => \$sock,
+    "U|url=s"               => \$url,
+    "u|user|username=s"     => \$user,
+    "x|pass|password=s"     => \$pass,
+    "w|warning=i"           => \$swarn,
 );
 
 # Want help?
 if ($help) {
     usage;
-    exit 3;
+    exit 0;
+}
+
+# print passed arguments and exit with code 2
+sub error_exit {
+    print @_;
+    exit $no_stats_exit_code;
 }
 
 my $haproxy;
@@ -205,8 +212,10 @@ if ($url and $lwp) {
         Peer => $sock,
         Type => SOCK_STREAM,
     );
-    die "Unable to connect to haproxy socket: $sock\n$@" unless $haproxyio;
-    print $haproxyio "show stat\n" or die "Print to socket failed: $!";
+    eval { die "Unable to connect to haproxy socket: $sock\n$!$@" unless $haproxyio; };
+    if(my $ev_err = $@) { error_exit($ev_err); }
+    print $haproxyio "show stat\n" or eval { die "Print to socket failed: $!"; };
+    if(my $ev_err = $@) { error_exit($ev_err); }
     $haproxy = '';
     while (<$haproxyio>) {
         $haproxy .= $_;
@@ -223,9 +232,11 @@ if ($dump) {
 # Get labels from first output line and map them to their position in the line
 my @hastats = ( split /\n/, $haproxy );
 my $labels = $hastats[0];
-die "Unable to retrieve haproxy stats" unless $labels;
+eval { die "Unable to retrieve haproxy stats" unless $labels; };
+if(my $ev_err = $@) { error_exit($ev_err); }
 chomp($labels);
-$labels =~ s/^# // or die "Data format not supported.";
+$labels =~ s/^# // or eval { die "Data format not supported."; };
+if(my $ev_err = $@) { error_exit($ev_err); }
 my @labels = split /,/, $labels;
 {
     no strict "refs";
@@ -242,7 +253,6 @@ our $scur;
 
 my @proxies = split ',', $proxy if $proxy;
 my @no_proxies = split ',', $no_proxy if $no_proxy;
-my @no_backends = split ',', $no_backend if $no_backend;
 my $exitcode = 0;
 my $msg;
 my $checked = 0;
@@ -261,13 +271,12 @@ foreach (@hastats) {
     my @data = split /,/, $_;
     if (@proxies) { next unless grep {$data[$pxname] eq $_} @proxies; };
     if (@no_proxies) { next if grep {$data[$pxname] eq $_} @no_proxies; };
-    if (@no_backends) { next if grep {$data[$pxname] eq $_} @no_backends; };
 
-    # Is session limit enforced?
-    if ($data[$slim]) {
-        $perfdata .= sprintf "%s-%s=%u;%u;%u;0;%u; ", $data[$pxname], $data[$svname], $data[$scur], $swarn * $data[$slim] / 100, $scrit * $data[$slim] / 100, $data[$slim];
+    # Is session limit enforced? (ignore backend fullconn limit)
+    if ($data[$slim] and $data[$svname] ne 'BACKEND') {
+        $perfdata .= sprintf "%s-%s=%u;%u;%u;0;%u ", $data[$pxname], $data[$svname], $data[$scur], $swarn * $data[$slim] / 100, $scrit * $data[$slim] / 100, $data[$slim];
 
-        # Check current session # against limit
+        # Check current sessions against limit
         my $sratio = $data[$scur]/$data[$slim];
         if ($sratio >= $scrit / 100 || $sratio >= $swarn / 100) {
             $exitcode = $sratio >= $scrit / 100 ? 2 :
@@ -291,7 +300,7 @@ foreach (@hastats) {
     # Check of servers
     } else {
         if ($data[$status] ne 'UP') {
-	    next if ($ignore_maint && $data[$status] =~ m/MAINT/);
+            next if ($ignore_maint && $data[$status] eq 'MAINT');
             next if $data[$status] eq 'no check';   # Ignore server if no check is configured to be run
             next if $data[$svname] eq 'sock-1';
             $exitcode = 2;
