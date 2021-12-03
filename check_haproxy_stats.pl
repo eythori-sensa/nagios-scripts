@@ -15,7 +15,7 @@
 # warranty of merchantability or fitness for a particular purpose.
 #
 
-our $VERSION = "1.1.1";
+our $VERSION = "1.1.3";
 
 open(STDERR, ">&STDOUT");
 
@@ -29,6 +29,7 @@ open(STDERR, ">&STDOUT");
 #   1.1.0   - support for HTTP interface
 #   1.1.1   - drop perl 5.10 requirement
 #   1.1.2   - fix perfdata (noudAndi)
+#   1.1.3   - fix Maintenance flag not being registered in newer versions of HAProxy - moved to a regex find.
 
 use strict;
 use warnings;
@@ -300,7 +301,7 @@ foreach (@hastats) {
     # Check of servers
     } else {
         if ($data[$status] ne 'UP') {
-            next if ($ignore_maint && $data[$status] eq 'MAINT');
+            next if ($ignore_maint && $data[$status] =~ m/MAINT/);
             next if $data[$status] eq 'no check';   # Ignore server if no check is configured to be run
             next if $data[$svname] eq 'sock-1';
             $exitcode = 2;
